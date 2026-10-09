@@ -1347,8 +1347,8 @@ function parsePlate(v){
   return null;
 }
 const KW = [
-  ['現着時間','arrive'],['到着時間','arrive'],['着時間','arrive'],['現着','arrive'],
-  ['出発時間','depart'],['発時間','depart'],
+  ['現着時間','arrive'],['到着時間','arrive'],['着時間','arrive'],['現着時刻','arrive'],['到着時刻','arrive'],['着時刻','arrive'],['現着','arrive'],
+  ['出発時間','depart'],['発時間','depart'],['出発時刻','depart'],['発時刻','depart'],['発車時刻','depart'],['発車時間','depart'],['発車','depOrFrom'],
   ['着場所','arrPlace'],['回収場所','arrPlace'],['回収','arrPlace'],['お迎え先','arrPlace'],['お迎え','arrPlace'],['迎車','arrPlace'],['迎え先','arrPlace'],
   ['出発場所','fromPlace'],['出発地','fromPlace'],['出発','depOrFrom'],
   ['経由','via'],
@@ -1364,6 +1364,43 @@ const KW = [
 const TIME_START = new RegExp('^\\s*[、,]?\\s*(今|いま|午前|午後|朝|夕方|夜|深夜|[' + NUMCH + '])');
 function singleKwOk(text, i){ const prev = i === 0 ? '' : text[i-1]; return i === 0 || /[\s、,。番目分時半0-9]/.test(prev) || TIME_START.test(text.slice(i+1)); }
 const CLEAR_RE = /^(を|は)?\s*(削除|消して|消す|けして|消去|クリア|なし|無し|取り消し|空欄|空)(して|に|する)?(ください|下さい)?$/;
+/** 時刻らしい文字（場所の欄には入れない）：9時・9時36分・九時三十六分・九時半・9:36 */
+const HAS_TIME = /\d{1,2}\s*時|[〇一二三四五六七八九十]{1,3}\s*時\s*(?:[〇一二三四五六七八九十]+\s*分|半)|\d{1,2}\s*:\s*\d{2}/;
+/** 行番号だけ（「1番」「二番目」など） */
+const ROW_ONLY = new RegExp('^[\\s、,。]*(?:No\\.?\\s*)?([' + NUMCH + ']+)\\s*(?:番目|番|件目|行目)[\\s、,。]*$');
+const rowOnlyNum = v => { const m = String(v || '').match(ROW_ONLY); if (!m) return null; const n = jaInt(m[1]); return isNaN(n) || n <= 0 ? null : n; };
+/** 声の聞き間違い・言い方のゆれをそろえる */
+function voiceAliases(t){
+  return t.replace(/原着|元着|減着|現地着|げんちゃく|ゲンチャク|現地到着/g, '現着').replace(/しゅっぱつ|シュッパツ/g, '出発').replace(/いちばん|イチバン/g, '一番');
+}
+const TIME_FIELDS = ['arrive','depart','arrOrPlace','depOrFrom','arrOrDest','dayStart','dayEnd'];
+/** 時刻の欄の値を読む：前の「が・は・の時間・時刻」、後ろの「です・で・ごろ・くらい」を外す → {t, tail} */
+function readTimeVal(v){
+  let s = String(v || ''), prev;
+  do { prev = s; s = s.replace(/^[\s、,。:：]+/, '').replace(/^(?:の時間|の時刻|時間|時刻|が|は|を|の)(?=\s|[、,。]|[0-9〇一二三四五六七八九十今い午朝夕夜深])/, ''); } while (s !== prev);
+  const pt = parseTime(s); if (!pt) return null;
+  let tail = pt.rest;
+  do { prev = tail; tail = tail.replace(/^[\s、,。]+/, '').replace(/^(?:でした|です|ですね|で|に|頃|ころ|ごろ|くらい|ぐらい|位|ちょうど|丁度|ね|よ)/, ''); } while (tail !== prev);
+  return { t: pt.t, tail: tail.replace(/[\s、,。]+$/, '').trim() };
+}
+/** 1回の文に「1番…。2番…」と複数の件があるとき、件ごとに分ける */
+function splitVoiceRows(input){
+  const text = voiceAliases(z2h(input || '').replace(/\s+/g, ' ').trim());
+  const keys = KW.map(([k]) => k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
+  const re = new RegExp('([\\s、,。分時半円])(?:No\\.?\\s*)?([' + NUMCH + ']+)\\s*(?:番目|番|件目|行目)(?=[\\s、,。]*(?:' + keys + '|削除|消して))', 'g');
+  const cuts = []; let m;
+  while ((m = re.exec(text))) {
+    const at = m.index + m[1].length, before = text.slice(0, at).replace(/[\s、,。]+$/, '');
+    if (!before || KW.some(([k]) => before.endsWith(k))) continue;     // 「経由 2番目 消して」などは分けない
+    if (isNaN(jaInt(m[2])) || jaInt(m[2]) <= 0) continue;
+    cuts.push(at);
+  }
+  if (!cuts.length) return [text];
+  const parts = []; let from = 0;
+  cuts.forEach(c => { parts.push(text.slice(from, c)); from = c; }); parts.push(text.slice(from));
+  return parts.map(x => x.replace(/^[\s、,。]+|[\s、,。]+$/g, '')).filter(Boolean);
+}
+window.splitVoiceRows = splitVoiceRows;
 const cleanPlace = s => z2h(s).trim().replace(/^[:：、,。は]\s*/, '').replace(/\s*(から|まで|へ|です|に|で)?[、,。\s]*$/, '').trim();
 /** 過去に入力した地名の辞書（長い順） */
 function placeDict(){
@@ -1402,7 +1439,7 @@ function splitStops(v, dict){
 window.splitStops = splitStops;
 function parseVoice(input, dict){
   const DICT = dict || placeDict();
-  let text = z2h(input || '').replace(/\s+/g, ' ').trim();
+  let text = voiceAliases(z2h(input || '').replace(/\s+/g, ' ').trim());
   const out = { text: input, row: null, ops: [], unknown: [], deleteRow: false };
   // 行番号は「文の先頭」かつ、すぐ後が区切り・項目名・削除・文末のときだけ（「一番堰」などの地名は行番号にしない）
   const rm = text.match(new RegExp('^(?:No\\.?\\s*)?([' + NUMCH + ']+)\\s*(番目|番|件目|行目)'));
@@ -1411,7 +1448,25 @@ function parseVoice(input, dict){
     const okNext = rest === '' || /^[\s、,。の]/.test(rest) || /^(を)?\s*(削除|消)/.test(rest) || KW.some(([k]) => rest.startsWith(k));
     if (okNext) { out.row = jaInt(rm[1]); text = rest.replace(/^\s*(の)?\s*[、,。]?\s*/, ''); }
   }
+  // 行番号が文の最後：「現着9時36分 出発9時50分 1番」
+  if (!out.row) {
+    const tm = text.match(new RegExp('([、,。分時半円0-9]|キロ|km)([\\s、,。]*)(?:No\\.?\\s*)?([' + NUMCH + ']+)\\s*(番目|番|件目|行目)[\\s、,。]*$', 'i'));
+    if (tm && jaInt(tm[3]) > 0) { out.row = jaInt(tm[3]); text = text.slice(0, tm.index + tm[1].length).trim(); }
+  }
   if (out.row && /^(を)?\s*(削除|消して|消す|けして|消去)(して)?(ください)?[。]?$/.test(text.trim())) { out.deleteRow = true; return out; }
+  // 「（車は）〇〇から戻って」→ 出発場所 〇〇
+  let backFrom = null;
+  text = text.replace(/(^|[、,。\s])(?:車(?:は|が|を|も)[、,\s]*)?([^、,。\s]+?)\s*(?:から|より)\s*(?:戻って(?:きた|来た|きて|来て|きました)?|戻り(?:ました)?|戻った|戻る|もどって|もどり|もどった|もどる)(?:ました|です)?/,
+    (m, pre, place) => { backFrom = place.replace(new RegExp('^.*(?:\\d{1,2}\\s*:\\s*\\d{2}|[' + NUMCH + ']+\\s*(?:時|分|半))'), '').replace(/^(?:車(?:は|が|を|も))/, ''); return pre + '。'; });
+  // 文の最後の「〇〇の」→ 最後の着場所（送り先）＝〇〇（例：「…から戻って、田尻の、」）
+  let finalDest = null;
+  {
+    const m = text.match(/(^|[、,。\s])([^、,。\s]{1,20}?)の[、,。\s]*$/);
+    if (m) {
+      const head = text.slice(0, m.index + m[1].length), before = head.replace(/[、,。\s]+$/, ''), gap = head.slice(before.length), x = m[2];
+      if (!KW.some(([k]) => (before.endsWith(k) && !gap.includes('。')) || (k.length > 1 && x.includes(k))) && !HAS_TIME.test(x) && rowOnlyNum(x) === null && !/^(車|それ|これ|あれ|今|いま)$/.test(x)) { finalDest = x; text = text.slice(0, m.index) + m[1]; }
+    }
+  }
   // 「6.5キロ」→「キロ 6.5」
   text = text.replace(new RegExp('([' + NUMCH + ']+(?:\\s*(?:\\.|点)\\s*[0-9〇一二三四五六七八九]+)?)\\s*(キロ|km|粁)', 'gi'), ' キロ $1 ');
   // 区切り
@@ -1422,7 +1477,27 @@ function parseVoice(input, dict){
     if (hit) { segs.push(cur); cur = { field: hit[1], val:'' }; i += hit[0].length; } else { cur.val += text[i]; i++; }
   }
   segs.push(cur);
+  // 「9時36分現着、9時50分出発」（時刻が先、項目名があと）→ 値を1つ後ろの項目へずらす
+  {
+    const clean = v => v.replace(/^[\s、,。]+|[\s、,。]+$/g, '');
+    const isT = v => { const r = readTimeVal(v); return !!r && !r.tail; };
+    if (segs.length >= 2 && !segs[0].field && isT(clean(segs[0].val)) && !clean(segs[segs.length-1].val) &&
+        segs.slice(1).every(sg => TIME_FIELDS.includes(sg.field)) && segs.slice(1, -1).every(sg => isT(clean(sg.val)))) {
+      for (let k = segs.length - 1; k >= 1; k--) segs[k].val = segs[k-1].val;
+      segs[0].val = '';
+    }
+  }
   const add = (field, action, value) => out.ops.push({ field, action, value });
+  // 時刻のあとに残った文字：行番号なら行番号に、それ以外は「読み取れなかった部分」に
+  const leftover = tail => { if (!tail) return; const n = rowOnlyNum(tail); if (n && !out.row) out.row = n; else if (!(n && n === out.row)) out.unknown.push(tail); };
+  // 場所の欄：時刻や行番号だけの値は入れない
+  const addPlace = (field, raw) => {
+    const c = cleanPlace(raw); if (!c) return;
+    const n = rowOnlyNum(c);
+    if (n) { if (!out.row) out.row = n; else if (n !== out.row) out.unknown.push(c); return; }
+    if (HAS_TIME.test(c)) { out.unknown.push(c); return; }
+    add(field, 'set', c);
+  };
   for (const sg of segs) {
     let v = sg.val.trim().replace(/^[:：、,。は]\s*/, '').replace(/[、,。]+$/, '').trim();
     let f = sg.field;
@@ -1437,13 +1512,16 @@ function parseVoice(input, dict){
       const map = { arrOrPlace:'arrPlace', depOrFrom:'fromPlace', arrOrDest:'dest', dayStart:'workStart', dayEnd:'workEnd' };
       add(map[f] || f, 'clear', null); continue;
     }
+    // 出発／発／着／到着：時刻で始まれば時刻、そうでなければ場所（場所の欄には時刻・行番号を入れない）
     if (f === 'arrOrPlace' || f === 'depOrFrom' || f === 'arrOrDest') {
-      const pt = parseTime(v);
-      if (pt && !pt.rest.replace(/^(です|に|頃|ごろ)/, '').trim()) f = f === 'depOrFrom' ? 'depart' : 'arrive';
-      else f = f === 'arrOrPlace' ? 'arrPlace' : f === 'depOrFrom' ? 'fromPlace' : 'dest';
+      const tv = readTimeVal(v);
+      if (tv) { add(f === 'depOrFrom' ? 'depart' : 'arrive', 'set', tv.t); leftover(tv.tail); }
+      else addPlace(f === 'arrOrPlace' ? 'arrPlace' : f === 'depOrFrom' ? 'fromPlace' : 'dest', v);
+      continue;
     }
+    if (f === 'arrPlace' || f === 'fromPlace' || f === 'dest') { addPlace(f, v); continue; }
     switch (f) {
-      case 'arrive': case 'depart': { const pt = parseTime(v); if (pt) add(f, 'set', pt.t); else out.unknown.push(v); break; }
+      case 'arrive': case 'depart': { const tv = readTimeVal(v); if (tv) { add(f, 'set', tv.t); leftover(tv.tail); } else out.unknown.push(v); break; }
       case 'km': { const p = parseNum(v); if (p) add('km', 'set', Math.round(p.n*10)/10); else out.unknown.push(v); break; }
       case 'cash': case 'unpaid': { const p = parseNum(v); if (p) add(f, 'set', Math.round(p.n)); else out.unknown.push(v); break; }
       case 'via': {
@@ -1453,11 +1531,13 @@ function parseVoice(input, dict){
         if (parts.length) add('via', 'append', parts); break; }
       case 'plate': { const p = parsePlate(v); if (p) { add('plate', 'set', p.plate); if (p.rest) add('car', 'set', cleanPlace(p.rest)); } else out.unknown.push(v); break; }
       case 'car': add('car', 'set', cleanPlace(v)); break;
-      case 'dayStart': case 'dayEnd': { const pt = parseTime(v); if (pt) add(f === 'dayStart' ? 'workStart' : 'workEnd', 'set', pt.t); else out.unknown.push(v); break; }
+      case 'dayStart': case 'dayEnd': { const tv = readTimeVal(v); if (tv) { add(f === 'dayStart' ? 'workStart' : 'workEnd', 'set', tv.t); leftover(tv.tail); } else out.unknown.push(v); break; }
       case 'partner': { const nm = cleanPlace(v).replace(/(さん|くん|君|ちゃん|氏)$/, '').trim(); if (nm) add('partner', 'set', nm); break; }
       default: { const c = cleanPlace(v); if (c) add(f, 'set', c); }
     }
   }
+  if (backFrom) addPlace('fromPlace', backFrom);
+  if (finalDest) addPlace('dest', finalDest);
   return out;
 }
 window.parseVoice = parseVoice;
@@ -1520,12 +1600,20 @@ function chipEditor(stops){
 }
 async function handleVoiceText(text){
   text = (text || '').trim(); if (!text) { toast('文章が空です'); return; }
+  const parts = splitVoiceRows(text);
+  if (parts.length < 2) return handleVoiceOne(text);
+  for (let k = 0; k < parts.length; k++) { const r = await handleVoiceOne(parts[k], { idx: k + 1, total: parts.length, whole: text }); if (r !== true) return r; }
+  return true;
+}
+const PLACE_FIELDS = ['arrPlace','fromPlace','dest'];
+const looksBadPlace = v => !!v && (HAS_TIME.test(v) || rowOnlyNum(v) !== null);
+async function handleVoiceOne(text, multi){
   const p = parseVoice(text);
   const date = S.view === 'form' ? ($('fDate').value || bizDateOf(new Date())) : (S.day || bizDateOf(new Date()));
   const list = entriesOn(date);
   if (p.deleteRow) {
     const e = list[p.row - 1]; if (!e) { toast(jDate(date) + ' に ' + p.row + '件目はありません'); return; }
-    $('bulk').value = ''; await deleteEntry(e.id); return;
+    $('bulk').value = ''; await deleteEntry(e.id); return true;
   }
   if (!p.ops.length) { await modal({ title:'読み取れませんでした', body:'「' + text + '」\n\n項目名（着・発・着場所・出発・経由・行き先・キロ・現金・ナンバー・車種・相方・出社・退社）を入れて話してください。\n\n' + EXAMPLES }); return; }
   // 日ごとの項目（出社・退社・行番号なしの相方）と、1件ごとの項目に分ける
@@ -1546,8 +1634,9 @@ async function handleVoiceText(text){
   const clears = p.ops.some(o => o.action === 'clear' || o.action === 'removeAt') || dayOps.some(o => o.action === 'clear');
   const title = !mode ? jDate(date) + ' の日報（出社・退社・相方）' : mode === 'existing' ? jDate(date) + ' の ' + p.row + '件目を修正' : mode === 'newRow' ? jDate(date) + ' に新しい件（' + (list.length + 1) + '件目）' : (S.editId ? '編集中の件に入れる' : '入力中の件に入れる');
   const cell = 'padding:6px 4px;color:var(--sub);white-space:nowrap;vertical-align:top';
-  const diffRow = (label, b, a, op) => '<tr><td style="' + cell + '">' + esc(label) + '</td><td style="padding:6px 4px"><span style="text-decoration:' + (b !== a && b !== '（なし）' ? 'line-through' : 'none') + ';color:var(--sub)">' + esc(b) + '</span> → <b style="color:' + (op.action === 'clear' ? 'var(--danger)' : 'var(--text)') + '">' + esc(a) + '</b>' + (op.action === 'append' ? ' <small>（追加）</small>' : op.action === 'clear' ? ' <small>（消す）</small>' : op.action === 'removeAt' ? ' <small>（' + op.value + 'つ目を消す）</small>' : '') + '</td></tr>';
-  let html = '<div style="margin-bottom:8px">🎤「' + esc(text) + '」</div>';
+  const ORANGE = 'color:#e8710a;font-weight:700';
+  const diffRow = (label, b, a, op, warn) => '<tr><td style="' + cell + '">' + esc(label) + '</td><td style="padding:6px 4px"><span style="text-decoration:' + (b !== a && b !== '（なし）' ? 'line-through' : 'none') + ';color:var(--sub)">' + esc(b) + '</span> → <b style="' + (warn ? ORANGE : 'color:' + (op.action === 'clear' ? 'var(--danger)' : 'var(--text)')) + '">' + esc(a) + '</b>' + (op.action === 'append' ? ' <small>（追加）</small>' : op.action === 'clear' ? ' <small>（消す）</small>' : op.action === 'removeAt' ? ' <small>（' + op.value + 'つ目を消す）</small>' : '') + '</td></tr>';
+  let html = (multi ? '<div style="margin-bottom:6px;color:var(--sub)">' + multi.total + '件ぶんの内容を分けて確認します（' + multi.idx + '/' + multi.total + '）</div>' : '') + '<div style="margin-bottom:8px">🎤「' + esc(text) + '」</div>';
   if (p.row && mode === 'newRow' && p.row > list.length + 1) html += '<div style="color:var(--warn-text)">' + p.row + '件目はまだないので、' + (list.length + 1) + '件目として入れます。</div>';
   html += '<table style="width:100%;border-collapse:collapse;font-size:15px">';
   if (dayOps.length) {
@@ -1558,33 +1647,36 @@ async function handleVoiceText(text){
   if (mode) [...new Set(p.ops.map(o => o.field))].forEach(f => {
     const op = p.ops.find(o => o.field === f), b = fieldDisp(before, f), a = fieldDisp(after, f);
     if (f === 'via' && op.action === 'append') html += '<tr><td style="' + cell + '">経由</td><td style="padding:6px 4px">今：' + esc(b) + '<br><b>＋ 下の ' + op.value.length + 'か所を後ろに追加</b></td></tr>';
-    else html += diffRow(f === 'partner' ? '相方（この件）' : FIELD_LABEL[f], b, a, op);
+    else html += diffRow(f === 'partner' ? '相方（この件）' : FIELD_LABEL[f], b, a, op, PLACE_FIELDS.includes(f) && looksBadPlace(after[f]));
   });
   html += '</table>';
+  // 場所の欄に時刻・行番号のような文字が入っている（前の読み違いなど）→ オレンジで知らせる
+  if (mode) PLACE_FIELDS.forEach(f => { const v = after[f]; if (looksBadPlace(v)) html += '<div class="badplace" style="margin-top:6px;' + ORANGE + '">⚠ ' + esc(FIELD_LABEL[f]) + 'に時刻のような文字「' + esc(v) + '」が入っています。' + (mode === 'existing' ? '「' + p.row + '番 ' + (f === 'fromPlace' ? '出発場所' : f === 'arrPlace' ? '着場所' : '行き先') + ' 消して」で消せます。' : '') + '</div>'; });
   if (p.unknown.length) html += '<div style="margin-top:8px;color:var(--warn-text)">読み取れなかった部分：' + esc(p.unknown.join(' / ')) + '</div>';
   window.__lastPreview = { mode, row: p.row, before, after, ops: p.ops, dayOps, chips };
   const btns = [{ label: clears ? '消して保存する' : 'この内容で保存', value: 'save', cls: clears ? 'danger fill' : 'primary' }];
   if (mode) btns.push({ label: 'フォームで直してから保存', value: 'edit' });
   btns.push({ label: 'やめる', value: null });
-  const how = await modal({ title, body: html, html: true, node: chips ? chips.el : null, buttons: btns });
-  if (!how) return;
+  const how = await modal({ title: multi ? title + '（' + multi.idx + '/' + multi.total + '）' : title, body: html, html: true, node: chips ? chips.el : null, buttons: btns });
+  if (!how) return false;
   $('bulk').value = '';
   if (dayOps.length) { db.days[date] = { ...rAfter, updatedAt: Date.now() }; await persist(); updateDatalists(); }
-  if (!mode) { S.day = date; if (S.view === 'day' || S.view === 'grid') renderDay(); toast('日報（' + dayOps.map(o => o.field === 'partner' ? '相方' : FIELD_LABEL[o.field]).join('・') + '）を保存しました'); return; }
+  if (!mode) { S.day = date; if (S.view === 'day' || S.view === 'grid') renderDay(); toast('日報（' + dayOps.map(o => o.field === 'partner' ? '相方' : FIELD_LABEL[o.field]).join('・') + '）を保存しました'); return true; }
   if (viaOp) { viaOp.value = chips.get(); after = applyOps(before, p.ops, prevArea); }
   if (mode === 'existing') {
-    if (how === 'edit') { await openEdit(target.id); fillForm({ ...after }); return; }
+    if (how === 'edit') { await openEdit(target.id); fillForm({ ...after }); return 'edit'; }
     const e = db.entries.find(x => x.id === target.id);
     const keys = ['arrive','depart','arrPlace','fromPlace','via','dest','km','cash','unpaid','pArea','pCls','pKana','pNum','car','partner'];
     keys.forEach(k => e[k] = after[k]); if (e.partner && e.partner === dayRec(date).partner) e.partner = ''; e.updatedAt = Date.now();
     await persist(); updateDatalists(); S.day = date; show(mainView()); toast(p.row + '件目を更新しました');
     const el = document.querySelector('[data-id="'+e.id+'"]'); if (el) { el.classList.add('flash'); el.scrollIntoView({ block:'center' }); }
-    return;
+    return true;
   }
   if (mode === 'newRow') { resetForm(date); S.dateTouched = true; }
   fillForm(after);
-  if (how === 'edit') { show('form'); return; }
+  if (how === 'edit') { show('form'); return 'edit'; }
   await saveEntry();
+  return true;
 }
 /* ---------- 音声認識（Web Speech API） ---------- */
 const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
