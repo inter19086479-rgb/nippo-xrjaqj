@@ -516,7 +516,7 @@ table.sh td.wrap{white-space:normal;word-break:break-all;font-size:12.5px;line-h
     <label class="f" for="sVoiceMode">マイクボタンの使い方</label>
     <select id="sVoiceMode"><option value="tap">タップで開始 → タップか無音で終了</option><option value="hold">押している間だけ聞く</option></select>
     <label class="f" for="sSilence">話し終わってから自動で止まるまで</label>
-    <select id="sSilence"><option value="1.5">1.5秒</option><option value="2">2秒</option><option value="2.5">2.5秒（標準）</option><option value="3">3秒</option><option value="4">4秒</option><option value="5">5秒</option></select>
+    <select id="sSilence"><option value="1.5">1.5秒</option><option value="2">2秒</option><option value="2.5">2.5秒</option><option value="3">3秒</option><option value="4">4秒（標準）</option><option value="5">5秒</option><option value="6">6秒</option><option value="7">7秒</option><option value="8">8秒</option></select>
     <div class="hint">1回の最大は60秒です。声はGoogleの音声認識で文字になります（日報データは送られません）。マイクが使えない開き方のときは、キーボードの🎤で「まとめて入力」欄に話してください。</div>
     <div class="kv" style="margin-top:8px"><span>この開き方での音声認識</span><span id="voiceInfo"></span></div>
   </div>
@@ -571,7 +571,10 @@ table.sh td.wrap{white-space:normal;word-break:break-all;font-size:12.5px;line-h
    ネットワーク通信は一切行いません。
    ========================================================= */
 const KEY = 'daikoNippo.v1', DRAFT_KEY = 'daikoNippo.draft';
-const DEF_SETTINGS = { cutoff: 6, name: '', radio: '', theme: 'auto', remindDays: 7, voiceMode: 'tap', silenceSec: 2.5, voiceOk: false };
+const DEF_SETTINGS = { cutoff: 6, name: '', radio: '', theme: 'auto', remindDays: 7, voiceMode: 'tap', silenceSec: 4, silenceMig: 1, voiceOk: false };
+/** 無音で止まるまでの秒数：1.5〜8秒（標準4秒） */
+const SIL_MIN = 1.5, SIL_MAX = 8, SIL_DEF = 4;
+const silenceSecOf = () => { const v = Number(db.settings.silenceSec); return isFinite(v) && v > 0 ? Math.min(SIL_MAX, Math.max(SIL_MIN, v)) : SIL_DEF; };
 let db = freshDb();
 let storeMode = 'mem';      // 'ls' | 'idb' | 'mem'
 let idbHandle = null, memDirty = false;
@@ -760,6 +763,8 @@ function normalizeDb(o){
     if (o.days && typeof o.days === 'object') d.days = normDays(o.days);
     if (o.months && typeof o.months === 'object') d.months = o.months;
     if (o.settings) d.settings = { ...DEF_SETTINGS, ...o.settings };
+    // 以前の標準（2.5秒）のままの人は新しい標準（4秒）へ（1回だけ。自分で選んだ他の秒数はそのまま）
+    if (o.settings && !o.settings.silenceMig) { if (o.settings.silenceSec == null || Number(o.settings.silenceSec) === 2.5) d.settings.silenceSec = SIL_DEF; d.settings.silenceMig = 1; }
     if (o.meta) d.meta = { ...d.meta, ...o.meta };
   }
   return d;
@@ -1266,7 +1271,7 @@ function renderSettings(){
   const lb = db.meta.lastBackupAt; $('lastBackup').textContent = lb ? (() => { const d = new Date(lb); return jDateFull(ymd(d)) + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes()); })() : 'なし';
   $('entryCount').textContent = db.entries.length + '件';
   renderPaySettings();
-  $('sVoiceMode').value = db.settings.voiceMode || 'tap'; $('sSilence').value = String(db.settings.silenceSec || 2.5);
+  $('sVoiceMode').value = db.settings.voiceMode || 'tap'; $('sSilence').value = String(silenceSecOf());
   $('voiceInfo').textContent = !SR ? '使えません（キーボードの🎤を使用）' : speechBroken ? '使えません（キーボードの🎤を使用）' : '使える見込み（初回に許可が必要）';
   $('storeInfo').textContent = storeMode === 'ls' ? 'このスマホ（localStorage）' : storeMode === 'idb' ? 'このスマホ（IndexedDB）' : '⚠ 一時的（閉じると消えます）';
   $('originInfo').textContent = location.protocol === 'file:' ? 'スマホ内のファイル' : location.protocol === 'content:' ? 'スマホ内のファイル（content）' : (location.host || location.protocol);
@@ -1691,44 +1696,66 @@ async function ensureVoiceOk(){
   if (ok) { db.settings.voiceOk = true; await persist(true); }
   return ok;
 }
-function stopRec(){ if (activeRec) { try { activeRec.stop(); } catch(e){} } }
+let recSession = null;
+function stopRec(){ if (recSession) recSession.stopping = true; if (activeRec) { try { activeRec.stop(); } catch(e){} } }
 function recPanel(text, on){
   const pnl = $('recPanel'); pnl.classList.toggle('hidden', !on);
-  if (on) { $('recLive').textContent = text || '（話してください）'; $('recHint').textContent = db.settings.voiceMode === 'hold' ? '指をはなすと終わります' : '話し終わって ' + (Number(db.settings.silenceSec)||2.5) + '秒たつと自動で止まります ・ タップで終了'; }
+  if (on) { $('recLive').textContent = text || '（話してください）'; $('recHint').textContent = db.settings.voiceMode === 'hold' ? '指をはなすと終わります' : '話し終わって ' + silenceSecOf() + '秒たつと自動で止まります ・ タップで終了'; }
 }
-/** 聞き取る（タップで開始・タップ/無音で終了。押している間モードあり）。最大60秒 */
+/** 聞き取る（タップで開始・タップ/無音で終了。押している間モードあり）。最大60秒
+ *  Androidの音声認識は途中で勝手に終わることがあるので、無音タイマーが切れる前に終わったら作り直して続きを聞く */
+const REC_MAX_MS = 60000;
 async function listen(onText, onInterim, btn, opt = {}){
   if (activeRec) { stopRec(); return; }
   if (speechBroken) { voiceHelp(!SR ? 'このブラウザには音声認識の機能がありません。' : 'この開き方では、ブラウザの音声認識が使えない状態です。'); return; }
   if (!db.settings.voiceOk) { if (!(await ensureVoiceOk())) return; if (opt.hold) { toast('もう一度、ボタンを押したまま話してください'); return; } }
-  let rec; try { rec = new SR(); } catch(e){ speechBroken = true; return voiceHelp('音声認識を開始できませんでした。'); }
-  rec.lang = 'ja-JP'; rec.interimResults = true; rec.continuous = true; rec.maxAlternatives = 1;
-  const silence = Math.round((Number(db.settings.silenceSec) || 2.5) * 1000);
-  let fin = '', lastErr = null, tSil = null; const label = btn ? btn.innerHTML : '';
-  const tMax = setTimeout(stopRec, 60000);
-  const arm = ms => { clearTimeout(tSil); if (!opt.hold) tSil = setTimeout(stopRec, ms); };
-  rec.onresult = ev => {
-    // 確定部分を作り直す（Androidで同じ文が重複して返る不具合への対策つき）
-    let acc = '', interim = '';
-    for (let i = 0; i < ev.results.length; i++) { const r = ev.results[i], t = r[0].transcript;
-      if (r.isFinal) { if (acc && t.trim().startsWith(acc.trim())) acc = t; else acc += t; } else interim += t; }
-    fin = acc; const live = (fin + interim).trim();
-    recPanel(live, true); if (onInterim) onInterim(live); arm(silence);
-  };
-  rec.onerror = ev => { lastErr = ev.error; };
-  rec.onend = () => {
+  const silence = Math.round(silenceSecOf() * 1000);
+  const ses = { stopping: false, restarts: 0, t0: Date.now() }; recSession = ses;
+  let base = '', fin = '', lastErr = null, tSil = null; const label = btn ? btn.innerHTML : '';
+  const join = (a, b) => !a ? b : !b ? a : (/\s$/.test(a) || /^\s/.test(b) ? a + b : a + ' ' + b);
+  const finish = () => {
     clearTimeout(tSil); clearTimeout(tMax); recPanel('', false);
-    activeRec = null; if (btn) { btn.innerHTML = label; btn.classList.remove('rec'); }
+    activeRec = null; if (recSession === ses) recSession = null; if (btn) { btn.innerHTML = label; btn.classList.remove('rec'); }
     if (lastErr && lastErr !== 'no-speech' && lastErr !== 'aborted') {
       const why = { 'not-allowed':'マイクの使用が許可されていないか、この開き方では音声認識が使えません。', 'service-not-allowed':'この開き方では音声認識が使えません。', 'network':'音声認識にはインターネット接続が必要です（声をGoogleで文字にするため）。', 'audio-capture':'マイクが見つかりません。', 'language-not-supported':'日本語の音声認識が使えません。' }[lastErr] || ('エラー：' + lastErr);
       if (lastErr === 'not-allowed' || lastErr === 'service-not-allowed') { speechBroken = true; document.querySelectorAll('.fmic').forEach(b => b.classList.add('hidden')); }
       voiceHelp(why); return;
     }
-    if (!fin.trim()) { toast('声が聞き取れませんでした'); return; }
-    onText(fin.trim());
+    const text = fin.trim();
+    if (!text) { toast('声が聞き取れませんでした'); return; }
+    onText(text);
   };
-  try { rec.start(); activeRec = rec; arm(Math.max(silence, 6000)); recPanel('', true); if (btn) { btn.innerHTML = btn.dataset.small ? '■' : '■ 聞いています…（タップで終了）'; btn.classList.add('rec'); } }
-  catch(e){ clearTimeout(tMax); speechBroken = true; voiceHelp('音声認識を開始できませんでした。'); }
+  const tMax = setTimeout(stopRec, REC_MAX_MS);
+  const arm = ms => { clearTimeout(tSil); if (!opt.hold) tSil = setTimeout(stopRec, ms); };
+  const startOne = () => {
+    let rec; try { rec = new SR(); } catch(e){ return null; }
+    rec.lang = 'ja-JP'; rec.interimResults = true; rec.continuous = true; rec.maxAlternatives = 1;
+    rec.onresult = ev => {
+      if (activeRec !== rec) return;
+      // 確定部分を作り直す（Androidで同じ文が重複して返る不具合への対策つき）
+      let acc = '', interim = '';
+      for (let i = 0; i < ev.results.length; i++) { const r = ev.results[i], t = r[0].transcript;
+        if (r.isFinal) { if (acc && t.trim().startsWith(acc.trim())) acc = t; else acc += t; } else interim += t; }
+      rec._acc = acc; fin = join(base, acc); const live = join(fin, interim).trim();
+      recPanel(live, true); if (onInterim) onInterim(live); arm(silence);
+    };
+    rec.onerror = ev => { if (activeRec === rec) lastErr = ev.error; };
+    rec.onend = () => {
+      if (activeRec !== rec) return;
+      base = join(base, rec._acc || ''); fin = base;
+      const fatal = lastErr && lastErr !== 'no-speech' && lastErr !== 'aborted';
+      // 自分で止めた・タイマーが切れた・60秒・エラー → 終了。それ以外（認識が勝手に終わった）→ 作り直して続ける
+      if (!ses.stopping && !fatal && Date.now() - ses.t0 < REC_MAX_MS - 500 && ses.restarts < 30) {
+        ses.restarts++; lastErr = null;
+        const nx = startOne(); if (nx) return;
+      }
+      finish();
+    };
+    try { rec.start(); } catch(e){ return null; }
+    activeRec = rec; return rec;
+  };
+  if (!startOne()) { clearTimeout(tMax); recSession = null; speechBroken = true; voiceHelp('音声認識を開始できませんでした。'); return; }
+  arm(Math.max(silence, 6000)); recPanel('', true); if (btn) { btn.innerHTML = btn.dataset.small ? '■' : '■ 聞いています…（タップで終了）'; btn.classList.add('rec'); }
 }
 /** マイクボタンの動作：タップ式 / 押している間だけ式（設定で切替） */
 function bindMic(btn, onText, onInterim, before){
@@ -1830,7 +1857,7 @@ function bind(){
   $('addWage').onclick = async () => { const c = payCfg(); c.wages = [...c.wages, { from: bizDateOf(new Date()), rate: wageOn(bizDateOf(new Date()), c) }]; db.settings.pay = c; await persist(true); renderPaySettings(); };
   ['pOt','pNight','pNs','pNe','pBreak','pRound'].forEach(id => $(id).addEventListener('change', savePay));
   $('sVoiceMode').onchange = e => changeSetting('voiceMode', e.target.value);
-  $('sSilence').onchange = e => changeSetting('silenceSec', Number(e.target.value));
+  $('sSilence').onchange = e => { db.settings.silenceMig = 1; changeSetting('silenceSec', Math.min(SIL_MAX, Math.max(SIL_MIN, Number(e.target.value) || SIL_DEF))); };
   $('btnBackup').onclick = doBackup;
   $('btnRestore').onclick = () => $('restoreFile').click();
   $('restoreFile').addEventListener('change', e => { const f = e.target.files[0]; e.target.value = ''; if (f) doRestore(f); });
