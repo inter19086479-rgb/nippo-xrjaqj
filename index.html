@@ -617,6 +617,18 @@ const plateText = e => [e.pArea, e.pCls, e.pKana, e.pNum].filter(Boolean).join('
 function fmtPlateNum(s){ const d = z2h(s).replace(/[^\d]/g,''); if (d.length === 4) return d.slice(0,2)+'-'+d.slice(2); if (d.length === 3) return d[0]+'-'+d.slice(1); return d.length ? d : z2h(s).trim(); }
 function dayRec(d){ const r = db.days[d] || {}; return { meter:'', workStart:'', workEnd:'', partner:'', wage:null, fuel:null, other:'', closedAt:null, ...r, name: r.name ?? db.settings.name ?? '', radio: r.radio ?? db.settings.radio ?? '' }; }
 const toMin = t => { const [h,m] = t.split(':').map(Number); return h*60+m; };
+/** 夜の仕事用の時刻の読み方：9:00〜11:59 → 21:00〜23:59、12時台 → 0時台。0〜8時・13〜23時はそのまま。'HH:MM' で返す */
+function nightHM(t){
+  if (t === null || t === undefined) return '';
+  const m = String(t).trim().match(/^(\d{1,2}):(\d{2})(?::\d{2}(?:\.\d+)?)?$/); if (!m) return String(t).trim();
+  let h = +m[1]; const mi = +m[2]; if (h > 23 || mi > 59) return String(t).trim();
+  if (h >= 9 && h <= 11) h += 12; else if (h === 12) h = 0;
+  return pad(h) + ':' + pad(mi);
+}
+const DAY_TIME_KEYS = ['workStart','workEnd','breakStart'];
+/** 日ごとの記録（出社・退社・休憩開始）の時刻を夜の読み方にそろえる */
+function normDayRec(r){ if (!r || typeof r !== 'object') return r; const o = { ...r }; DAY_TIME_KEYS.forEach(k => { if (o[k]) o[k] = nightHM(o[k]); }); return o; }
+function normDays(days){ const o = {}; Object.keys(days || {}).forEach(d => o[d] = normDayRec(days[d])); return o; }
 /** 稼働時間（分）：出社〜退社。日をまたいでもOK */
 function workMin(r){ if (!r || !r.workStart || !r.workEnd) return null; let a = toMin(r.workStart), b = toMin(r.workEnd); if (b <= a) b += 1440; return b - a; }
 const fmtDur = m => m === null || m === undefined ? '' : Math.floor(m/60) + '時間' + (m%60 ? pad(m%60) + '分' : '');
@@ -735,7 +747,7 @@ async function persist(keepChange){
 function saveDraft(d){ if (storeMode !== 'ls') return; try { d ? localStorage.setItem(DRAFT_KEY, JSON.stringify(d)) : localStorage.removeItem(DRAFT_KEY); } catch(e){} }
 function loadDraft(){ if (storeMode !== 'ls') return null; try { return JSON.parse(localStorage.getItem(DRAFT_KEY) || 'null'); } catch(e){ return null; } }
 function normEntry(e){
-  return { id: String(e.id || uid()), bizDate: String(e.bizDate), arrive: e.arrive || '', depart: e.depart || '',
+  return { id: String(e.id || uid()), bizDate: String(e.bizDate), arrive: nightHM(e.arrive), depart: nightHM(e.depart),
     arrPlace: e.arrPlace || '', fromPlace: e.fromPlace || '', via: Array.isArray(e.via) ? e.via.filter(Boolean).map(String) : (e.via ? [String(e.via)] : []),
     dest: e.dest || '', km: numOrNull(e.km), cash: numOrNull(e.cash) === null ? null : Math.round(e.cash), unpaid: numOrNull(e.unpaid) === null ? null : Math.round(e.unpaid),
     pArea: e.pArea || '', pCls: e.pCls || '', pKana: e.pKana || '', pNum: e.pNum || '', car: e.car || '', partner: e.partner || '',
@@ -745,7 +757,7 @@ function normalizeDb(o){
   const d = freshDb();
   if (o && typeof o === 'object') {
     if (Array.isArray(o.entries)) d.entries = o.entries.filter(e => e && e.bizDate).map(normEntry);
-    if (o.days && typeof o.days === 'object') d.days = o.days;
+    if (o.days && typeof o.days === 'object') d.days = normDays(o.days);
     if (o.months && typeof o.months === 'object') d.months = o.months;
     if (o.settings) d.settings = { ...DEF_SETTINGS, ...o.settings };
     if (o.meta) d.meta = { ...d.meta, ...o.meta };
@@ -796,7 +808,7 @@ function addViaRow(val=''){
 }
 function renumberVia(){ [...$('viaList').children].forEach((w,i) => { w.querySelector('.vno').textContent = '経由' + (i+1); w.querySelector('.vup').style.visibility = i ? 'visible' : 'hidden'; }); }
 function readForm(){
-  return { bizDate: $('fDate').value, arrive: $('fArrive').value, depart: $('fDepart').value,
+  return { bizDate: $('fDate').value, arrive: nightHM($('fArrive').value), depart: nightHM($('fDepart').value),
     arrPlace: $('fArrPlace').value.trim(), fromPlace: $('fFromPlace').value.trim(),
     via: [...$('viaList').querySelectorAll('input')].map(i => i.value.trim()).filter(Boolean), dest: $('fDest').value.trim(),
     kmText: z2h($('fKm').value).trim(), cashText: $('fCash').value, unpaidText: $('fUnpaid').value,
@@ -805,7 +817,7 @@ function readForm(){
 const setYenInput = (el, v) => { el.value = (v === null || v === undefined || v === '') ? '' : comma(yenOrNull(String(v))); };
 function fillForm(e){
   $('fDate').value = e.bizDate || bizDateOf(new Date());
-  $('fArrive').value = e.arrive || ''; $('fDepart').value = e.depart || '';
+  $('fArrive').value = nightHM(e.arrive); $('fDepart').value = nightHM(e.depart);
   $('fArrPlace').value = e.arrPlace || ''; $('fFromPlace').value = e.fromPlace || ''; $('fDest').value = e.dest || '';
   $('fKm').value = e.kmText !== undefined ? e.kmText : (e.km === null || e.km === undefined ? '' : String(e.km));
   setYenInput($('fCash'), e.cashText !== undefined ? e.cashText : e.cash);
@@ -824,7 +836,7 @@ function resetForm(keepDate){
 }
 /** 前の件（同じ営業日で時刻が前の件。なければ最後に入力した件） */
 function prevEntry(){
-  const d = $('fDate').value, a = $('fArrive').value || $('fDepart').value;
+  const d = $('fDate').value, a = nightHM($('fArrive').value || $('fDepart').value);
   const list = entriesOn(d).filter(e => e.id !== S.editId);
   if (list.length) { const k = a ? timeKey(a) : 1e9; const before = list.filter(e => timeKey(e.arrive||e.depart) <= k); return (before.length ? before : list)[(before.length ? before : list).length-1]; }
   return db.entries.slice().sort((x,y) => (x.createdAt||0) - (y.createdAt||0)).filter(e => e.id !== S.editId).pop() || null;
@@ -832,7 +844,7 @@ function prevEntry(){
 function updateFormHints(){
   const d = $('fDate').value, c = cutoff();
   $('dateHint').textContent = d ? jDateFull(d) + ' の営業日（' + c + ':00 で日付が切り替わります。0:00〜' + c + ':00 の仕事は前日の営業日に入ります）' : '';
-  const a = $('fArrive').value, p = $('fDepart').value, t = a || p;
+  const a = nightHM($('fArrive').value), p = nightHM($('fDepart').value), t = a || p;
   const h = [];
   if (d && t && isNext(t)) h.push('深夜の時刻です → 実際の日付は ' + jDate(addDays(d,1)) + '（営業日は ' + jDate(d) + ' のまま）');
   if (a && p && timeKey(p) < timeKey(a)) h.push('⚠ 発の時間が着の時間より前になっています');
@@ -954,7 +966,7 @@ function renderFoot(){
   updateWorkInfo();
 }
 function updateWorkInfo(){
-  const r = { ...dayRec(S.day), workStart: $('kStart').value, workEnd: $('kEnd').value, breakMin: $('kBreak').value, breakStart: $('kBreakStart').value }, m = workMin(r);
+  const r = { ...dayRec(S.day), workStart: nightHM($('kStart').value), workEnd: nightHM($('kEnd').value), breakMin: $('kBreak').value, breakStart: nightHM($('kBreakStart').value) }, m = workMin(r);
   $('workInfo').innerHTML = m === null ? '稼働時間：出社と退社を入れると自動で計算します' : '稼働時間：<b>' + esc(tText(r.workStart)) + '〜' + esc(tText(r.workEnd)) + '　' + fmtDur(m) + '</b>';
   const pc = payCalcRec(S.day, r); $('payBox').innerHTML = payHtml(pc);
   const cfg = payCfg(); $('payRateInfo').textContent = '時給 ' + yen(wageOn(S.day, cfg)) + '・時間外+' + cfg.ot + '%・深夜+' + cfg.night + '%';
@@ -965,7 +977,7 @@ let footT;
 async function saveFoot(){
   const d = S.day; if (isClosed(d)) return;
   const r = dayRec(d);
-  document.querySelectorAll('[data-k]').forEach(el => { const k = el.dataset.k; r[k] = el.dataset.yen ? yenOrNull(el.value) : z2h(el.value).trim(); });
+  document.querySelectorAll('[data-k]').forEach(el => { const k = el.dataset.k; r[k] = el.dataset.yen ? yenOrNull(el.value) : DAY_TIME_KEYS.includes(k) ? nightHM(el.value) : z2h(el.value).trim(); });
   r.updatedAt = Date.now(); db.days[d] = r;
   if (r.name) db.settings.name = r.name;
   if (r.radio) db.settings.radio = r.radio;
@@ -1209,7 +1221,7 @@ async function doBackup(){
 async function doRestore(file){
   let o; try { o = JSON.parse(await file.text()); } catch(e){ await modal({ title:'読み込めませんでした', body:'このファイルは代行日報のバックアップではないようです。' }); return; }
   if (!o || !Array.isArray(o.entries)) { await modal({ title:'読み込めませんでした', body:'バックアップの形式が違います。' }); return; }
-  const inc = o.entries.filter(e => e && e.bizDate).map(normEntry), incDays = (o.days && typeof o.days === 'object') ? o.days : {};
+  const inc = o.entries.filter(e => e && e.bizDate).map(normEntry), incDays = (o.days && typeof o.days === 'object') ? normDays(o.days) : {};
   const partial = o.kind === 'day' || o.kind === 'month';
   const btns = [{label:'今のデータに追加する（同じものは新しい方を残す）', value:'merge', cls:'primary'}];
   if (!partial) btns.push({label:'今のデータを消して置き換える', value:'replace', cls:'danger'});
@@ -1307,7 +1319,7 @@ function parseNum(s){
 /** 時刻を読む → {t:'HH:MM', rest} */
 function parseTime(s){
   s = z2h(s).trim();
-  let m = s.match(/^(今|いま)(です)?/); if (m) return { t: nowHM(), rest: s.slice(m[0].length).trim() };
+  let m = s.match(/^(今|いま)(です)?/); if (m) return { t: nightHM(nowHM()), rest: s.slice(m[0].length).trim() };
   let pm = 0, mm;
   m = s.match(/^(午前|午後|朝|夕方|夜|深夜)\s*/); const pre = m ? m[1] : ''; if (m) s = s.slice(m[0].length);
   let h, mi, used;
@@ -1319,7 +1331,7 @@ function parseTime(s){
   if ((pre === '午後' || pre === '夕方') && h < 12) h += 12;
   if (pre === '夜' && h >= 5 && h < 12) h += 12;
   if (h >= 24) h -= 24;
-  return { t: pad(h) + ':' + pad(mi), rest: s.slice(used.length).trim() };
+  return { t: nightHM(pad(h) + ':' + pad(mi)), rest: s.slice(used.length).trim() };
 }
 const kata2hira = s => s.replace(/[ァ-ヶ]/g, c => String.fromCharCode(c.charCodeAt(0) - 0x60));
 /** ナンバーを読む：「宮城 500 さ 12-34 ノート」 */
@@ -1651,12 +1663,14 @@ function bind(){
   document.querySelectorAll('nav.tabs button').forEach(b => b.onclick = () => { if (b.dataset.tab === 'form' && !S.editId && !$('fDate').value) resetForm(); show(b.dataset.tab); });
   $('storeChip').onclick = () => show('set');
   document.querySelectorAll('[data-now]').forEach(b => b.onclick = () => {
-    $(b.dataset.now).value = nowHM();
+    $(b.dataset.now).value = nightHM(nowHM());
     if (!S.editId && !S.dateTouched) $('fDate').value = bizDateOf(new Date());
     onFormInput();
   });
   $('fDate').addEventListener('change', () => { S.dateTouched = true; onFormInput(); });
   F_TEXT.forEach(id => $(id).addEventListener('input', onFormInput));
+  // 時刻：9〜11時台は夜（21〜23時台）、12時台は0時台に直して表示
+  ['fArrive','fDepart','kStart','kEnd','kBreakStart'].forEach(id => ['change','blur'].forEach(ev => $(id).addEventListener(ev, e => { const v = nightHM(e.target.value); if (e.target.value && v !== e.target.value) { e.target.value = v; if (id[0] === 'f') onFormInput(); else updateWorkInfo(); } })));
   ['fCash','fUnpaid'].forEach(id => $(id).addEventListener('input', e => { const raw = z2h(e.target.value).replace(/[^\d]/g,'').replace(/^0+(?=\d)/,''); e.target.value = raw ? comma(Number(raw)) : ''; onFormInput(); }));
   $('fKm').addEventListener('blur', e => { e.target.value = z2h(e.target.value).trim(); });
   $('pNum').addEventListener('input', updatePlateSuggest);
@@ -1674,7 +1688,7 @@ function bind(){
   };
   $('recStop').onclick = () => stopRec();
   $('btnParse').onclick = () => handleVoiceText($('bulk').value);
-  $('btnVoiceHelp').onclick = () => modal({ title:'声・まとめて入力の使い方', body:'項目名のあとに内容を話します（順番は自由、言わない項目はそのまま）。\n「〇番」から始めると、その営業日の〇件目を直します。日報画面の🎤からも使えます。\n\n' + EXAMPLES + '\n\n項目名：着／発（時間）・着場所（お迎え・回収）・出発（場所）・経由・行き先（送り先）・キロ（実車・距離）・現金（料金）・未収・ナンバー・車種\n時間：7時55分・7時半・午後11時・今\n\n※ 🎤ボタンが使えないときは、この欄をタップしてキーボードのマイクで話し、「読み取る」を押してください。' });
+  $('btnVoiceHelp').onclick = () => modal({ title:'声・まとめて入力の使い方', body:'項目名のあとに内容を話します（順番は自由、言わない項目はそのまま）。\n「〇番」から始めると、その営業日の〇件目を直します。日報画面の🎤からも使えます。\n\n' + EXAMPLES + '\n\n項目名：着／発（時間）・着場所（お迎え・回収）・出発（場所）・経由・行き先（送り先）・キロ（実車・距離）・現金（料金）・未収・ナンバー・車種\n時間：7時55分・7時半・午後11時・今（9〜11時台は夜の21〜23時台、12時台は0時台として入ります）\n\n※ 🎤ボタンが使えないときは、この欄をタップしてキーボードのマイクで話し、「読み取る」を押してください。' });
   $('fab').onclick = () => addForDay(S.view === 'day' ? S.day : null);
   $('dPrev').onclick = () => { S.day = addDays(S.day, -1); renderDay(); };
   $('dNext').onclick = () => { S.day = addDays(S.day, 1); renderDay(); };
@@ -1696,7 +1710,7 @@ function bind(){
     el.addEventListener('input', () => { clearTimeout(footT); $('footSaved').textContent = ''; footT = setTimeout(saveFoot, 600); });
     el.addEventListener('change', () => { clearTimeout(footT); saveFoot(); });
   });
-  document.querySelectorAll('[data-know]').forEach(b => b.onclick = () => { $(b.dataset.know).value = nowHM(); saveFoot(); });
+  document.querySelectorAll('[data-know]').forEach(b => b.onclick = () => { $(b.dataset.know).value = nightHM(nowHM()); saveFoot(); });
   $('btnCopyDay').onclick = () => copyText(dayText(S.day));
   if (navigator.share) { $('btnShareDay').classList.remove('hidden'); $('btnShareDay').onclick = () => shareText(dayText(S.day)); }
   $('btnCsvDay').onclick = () => exportDayCsv(S.day);
@@ -1868,6 +1882,7 @@ async function gSave(i, f, raw, final){
   if (p.bad) { if (el) el.classList.add('invalid'); if (final) toast('実車粁は数字で入れてください（例：6.5）'); return false; }
   if (el) el.classList.remove('invalid');
   let v = p.v; if (final && f === 'pNum' && v) v = fmtPlateNum(v);
+  if ((f === 'arrive' || f === 'depart') && v) v = nightHM(v);
   let e = gRowEntry(i);
   const now = Date.now();
   if (!e) {
@@ -1888,7 +1903,7 @@ async function gSave(i, f, raw, final){
 async function gSaveDay(k, raw){
   const d = S.day; if (isClosed(d)) return;
   const r = dayRec(d);
-  r[k] = (k === 'fuel' || k === 'wage') ? yenOrNull(raw) : z2h(String(raw ?? '')).trim();
+  r[k] = (k === 'fuel' || k === 'wage') ? yenOrNull(raw) : DAY_TIME_KEYS.includes(k) ? nightHM(z2h(String(raw ?? ''))) : z2h(String(raw ?? '')).trim();
   r.updatedAt = Date.now(); db.days[d] = r;
   if (k === 'name' && r.name) db.settings.name = r.name;
   if (k === 'radio' && r.radio) db.settings.radio = r.radio;
@@ -1897,11 +1912,13 @@ async function gSaveDay(k, raw){
 /** 時間の入力（今ボタンつき） */
 async function gTimeBox(title, cur, hint){
   const box = document.createElement('div');
-  box.innerHTML = '<div class="tedit"><input type="time" id="gtIn" value="' + esc(cur || '') + '" aria-label="時間"><button type="button" class="now" id="gtNow">今</button><button type="button" id="gtClr">消す</button></div>' + (hint ? '<div class="hint">' + esc(hint) + '</div>' : '');
-  box.querySelector('#gtNow').onclick = () => { box.querySelector('#gtIn').value = nowHM(); };
+  box.innerHTML = '<div class="tedit"><input type="time" id="gtIn" value="' + esc(nightHM(cur)) + '" aria-label="時間"><button type="button" class="now" id="gtNow">今</button><button type="button" id="gtClr">消す</button></div><div class="hint">9:00〜11:59 は夜の21:00〜23:59、12時台は0時台として入ります（例：9:36 → 21:36）。</div>' + (hint ? '<div class="hint">' + esc(hint) + '</div>' : '');
+  const gtIn = box.querySelector('#gtIn');
+  ['change','blur'].forEach(ev => gtIn.addEventListener(ev, () => { const v = nightHM(gtIn.value); if (gtIn.value && v !== gtIn.value) gtIn.value = v; }));
+  box.querySelector('#gtNow').onclick = () => { gtIn.value = nightHM(nowHM()); };
   box.querySelector('#gtClr').onclick = () => { box.querySelector('#gtIn').value = ''; };
   const how = await modal({ title, node: box, buttons: [{ label: '決定', value: 'ok', cls: 'primary' }, { label: 'やめる', value: null }] });
-  return how === 'ok' ? box.querySelector('#gtIn').value : undefined;
+  return how === 'ok' ? nightHM(box.querySelector('#gtIn').value) : undefined;
 }
 async function gEditTime(i, f){
   if (!(await ensureOpen(S.day))) { renderGrid(); return; }
